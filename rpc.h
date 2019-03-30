@@ -26,7 +26,24 @@ using return_from_signatire_t = typename tuple_from_signatire<T>::ReturnType;
 } // namespace traits
 
 
-template<class Derived, typename PayloadType, uint16_t DomainId = 0>
+namespace identifiers {
+
+template<uint16_t instanceId = 0>
+struct StaticId {
+    constexpr static uint16_t getInstanceId() { return instanceId; }
+};
+
+struct DynamicId {
+    uint16_t instanceId;
+
+    void setInstanceId(uint16_t id) { instanceId = id; }
+    uint16_t getInstanceId() { return instanceId; }
+};
+
+} // namespace identifiers
+
+
+template<class Derived, typename PayloadType, typename Identifier = identifiers::StaticId<>>
 class RpcInterface;
 
 template<typename Signature, typename RpcInterface>
@@ -62,8 +79,8 @@ std::function<void(const Payload&)> makeHandler(RpcCall<Signature, Interface>& r
 /// Tuple is std::tuple of non-const/volatile non-reference `Args...`
 template<typename Payload>
 struct RpcMessage {
-    uint16_t domainId = 0;
-    uint16_t callerId = 0;
+    uint16_t instanceId = 0;
+    uint16_t functionId = 0;
     uint32_t callId = 0;
     Payload payload;
 };
@@ -78,7 +95,7 @@ struct RpcCall<ReturnType(Args...), RpcInterfaceType> {
     using Payload = typename RpcInterfaceType::Payload;
     using DerivedInterface = typename RpcInterfaceType::Derived;
 
-    friend class RpcInterface<DerivedInterface, Payload, RpcInterfaceType::GetDomainId()>;
+    friend class RpcInterface<DerivedInterface, Payload, typename RpcInterfaceType::Identifier>;
     friend std::function<void(const Payload&)> details::makeHandler<Payload, ReturnType(Args...), RpcInterfaceType>(RpcCall&);
 
     RpcCall(RpcInterfaceType* rpcInterface) {
@@ -90,10 +107,10 @@ struct RpcCall<ReturnType(Args...), RpcInterfaceType> {
         remoteCallback = std::forward<Functor>(f);
     }
 
-    inline auto operator() (Args... args) {
+    inline decltype(auto) operator() (Args... args) {
         Message message;
-        message.domainId = RpcInterfaceType::GetDomainId();
-        message.callerId = callerId;
+        message.instanceId = interface->getInstanceId();
+        message.functionId = functionId;
         message.callId = interface->getNextCallId();
         message.payload.serialize(args...);
 
@@ -101,35 +118,34 @@ struct RpcCall<ReturnType(Args...), RpcInterfaceType> {
     }
 
 protected:
-    RpcInterfaceType* interface;
     std::function<ReturnType(Args...)> remoteCallback;
-    uint16_t callerId = 0;
+    uint16_t functionId = 0;
+    RpcInterfaceType* interface;
 };
 
 
 ///
-template<class DerivedType, typename PayloadType, uint16_t DomainId>
-class RpcInterface {
+template<class DerivedType, typename PayloadType, typename IdentifierType>
+class RpcInterface : public IdentifierType {
 public:
     using Payload = PayloadType;
     using Message = RpcMessage<Payload>;
     using Derived = DerivedType;
+    using Identifier = IdentifierType;
 
     template<typename Signature>
     using Rpc = RpcCall<Signature, RpcInterface>;
 
-    constexpr static int GetDomainId() { return DomainId; }
-
     template<typename Signature>
     void registerCall(Rpc<Signature>& call) {
-        call.callerId = callerIdCounter++;
+        call.functionId = functionIdCounter++;
         call.interface = this;
-        handlers[call.callerId] = details::makeHandler<Payload>(call);
+        callHandlers[call.functionId] = details::makeHandler<Payload>(call);
     }
 
     void dispatch(const Message& message) {
-        auto handlerIt = handlers.find(message.callerId);
-        if (handlerIt != handlers.end()) {
+        auto handlerIt = callHandlers.find(message.functionId);
+        if (handlerIt != callHandlers.end()) {
             handlerIt->second(message.payload);
         }
     }
@@ -138,8 +154,9 @@ public:
 protected:
 
     uint32_t callIdCounter = 0;
-    uint16_t callerIdCounter = 0;
-    std::unordered_map<int, std::function<void(const Payload&)>> handlers;
+    uint16_t functionIdCounter = 0;
+    std::unordered_map<uint16_t, std::function<void(const Payload&)>> callHandlers;
+    std::unordered_map<uint16_t, std::function<void(const Payload&)>> resultHandlers;
 };
 
 

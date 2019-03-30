@@ -65,7 +65,7 @@ struct ExampleInterface : public rpc::RpcInterface<ExampleInterface, Payload> {
 
 
 int main() {
-    /// ----------------- sener side
+    /// ----------------- sender side
     ExampleInterface sender;
     sender.addAccount(1, "Eddart", 1000.1);
     sender.addPhonebook({{"John", 3355450}, {"Rob", 1194517}});
