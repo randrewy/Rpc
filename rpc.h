@@ -43,7 +43,7 @@ struct DynamicId {
 } // namespace identifiers
 
 
-template<class Derived, typename PayloadType, typename Identifier = identifiers::StaticId<>>
+template<class Actual, typename PayloadType, typename Identifier = identifiers::StaticId<>>
 class RpcInterface;
 
 template<typename Signature, typename RpcInterface>
@@ -52,9 +52,11 @@ struct RpcCall;
 
 namespace details {
 
-template<typename Payload, typename Signature, typename Interface>
-std::function<void(const Payload&)> makeHandler(RpcCall<Signature, Interface>& rpcCall);
+template<typename Message, typename Signature, typename Interface>
+std::function<void(const Message&)> makeCallHandler(RpcCall<Signature, Interface>& rpcCall);
 
+template<typename ActualInterface, typename Message, typename Signature>
+std::function<void(ActualInterface*, const Message&)> makeResultHandler();
 
 
 } // namespace details
@@ -83,20 +85,21 @@ struct RpcMessage {
     uint16_t functionId = 0;
     uint32_t callId = 0;
     Payload payload;
+    bool response = false;
 };
 
 
 ///
 template<typename ReturnType, typename RpcInterfaceType, typename... Args>
 struct RpcCall<ReturnType(Args...), RpcInterfaceType> {
-    static_assert (std::is_same_v<void, ReturnType>, "RPC with return type are not supported");
-
     using Message = typename RpcInterfaceType::Message;
     using Payload = typename RpcInterfaceType::Payload;
-    using DerivedInterface = typename RpcInterfaceType::Derived;
+    using ActualInterface = typename RpcInterfaceType::Actual;
 
-    friend class RpcInterface<DerivedInterface, Payload, typename RpcInterfaceType::Identifier>;
-    friend std::function<void(const Payload&)> details::makeHandler<Payload, ReturnType(Args...), RpcInterfaceType>(RpcCall&);
+    friend class RpcInterface<ActualInterface, Payload, typename RpcInterfaceType::Identifier>;
+    friend std::function<void(const Message&)> details::makeCallHandler<Message, ReturnType(Args...), RpcInterfaceType>(RpcCall&);
+    friend std::function<void(ActualInterface*, const Message&)> details::makeResultHandler<ActualInterface, Message, ReturnType(Args...)>();
+
 
     RpcCall(RpcInterfaceType* rpcInterface) {
         rpcInterface->registerCall(*this);
@@ -108,16 +111,26 @@ struct RpcCall<ReturnType(Args...), RpcInterfaceType> {
     }
 
     inline decltype(auto) operator() (Args... args) {
-        Message message;
-        message.instanceId = interface->getInstanceId();
-        message.functionId = functionId;
-        message.callId = interface->getNextCallId();
-        message.payload.serialize(args...);
-
-        return static_cast<DerivedInterface*>(interface)->template doRemoteCall<ReturnType>(std::move(message));
+        return doRemoteCall<false>(0, args...);
     }
 
 protected:
+
+    template<bool response>
+    inline decltype(auto) doRemoteCall(uint32_t callId, Args... args) {
+        Message message;
+        message.instanceId = interface->getInstanceId();
+        message.functionId = functionId;
+        message.callId = response
+                ? callId
+                : interface->getNextCallId();
+        message.payload.serialize(args...);
+        message.response = response;
+
+        using Return = std::conditional_t<response, void, ReturnType>;
+        return static_cast<ActualInterface*>(interface)->template doRemoteCall<Return>(std::move(message));
+    }
+
     std::function<ReturnType(Args...)> remoteCallback;
     uint16_t functionId = 0;
     RpcInterfaceType* interface;
@@ -125,12 +138,12 @@ protected:
 
 
 ///
-template<class DerivedType, typename PayloadType, typename IdentifierType>
+template<class ActualType, typename PayloadType, typename IdentifierType>
 class RpcInterface : public IdentifierType {
 public:
     using Payload = PayloadType;
     using Message = RpcMessage<Payload>;
-    using Derived = DerivedType;
+    using Actual = ActualType;
     using Identifier = IdentifierType;
 
     template<typename Signature>
@@ -140,13 +153,25 @@ public:
     void registerCall(Rpc<Signature>& call) {
         call.functionId = functionIdCounter++;
         call.interface = this;
-        callHandlers[call.functionId] = details::makeHandler<Payload>(call);
+        callHandlers[call.functionId] = details::makeCallHandler<Message>(call);
+
+        using ReturnType = traits::return_from_signatire_t<Signature>;
+        if constexpr (!std::is_same_v<void, ReturnType>) {
+            resultHandlers[call.functionId] = details::makeResultHandler<Actual, Message, Signature>();
+        }
     }
 
     void dispatch(const Message& message) {
-        auto handlerIt = callHandlers.find(message.functionId);
-        if (handlerIt != callHandlers.end()) {
-            handlerIt->second(message.payload);
+        if (message.response) {
+            auto handlerIt = resultHandlers.find(message.functionId);
+            if (handlerIt != resultHandlers.end()) {
+                handlerIt->second(static_cast<Actual*>(this), message);
+            }
+        } else {
+            auto handlerIt = callHandlers.find(message.functionId);
+            if (handlerIt != callHandlers.end()) {
+                handlerIt->second(message);
+            }
         }
     }
 
@@ -155,25 +180,42 @@ protected:
 
     uint32_t callIdCounter = 0;
     uint16_t functionIdCounter = 0;
-    std::unordered_map<uint16_t, std::function<void(const Payload&)>> callHandlers;
-    std::unordered_map<uint16_t, std::function<void(const Payload&)>> resultHandlers;
+    std::unordered_map<uint16_t, std::function<void(const Message&)>> callHandlers;
+    std::unordered_map<uint16_t, std::function<void(Actual*, const Message&)>> resultHandlers; // TODO:: can be plain function pointers
 };
 
 
 
 namespace details {
 
-template<typename Payload, typename Signature, typename Interface>
-std::function<void(const Payload&)> makeHandler(RpcCall<Signature, Interface>& rpcCall) {
-    // rpcCall is a reference to member
-    return [&rpcCall](const Payload& payload) {
-        using TupleType = traits::tuple_from_signatire_t<Signature>;
-        const auto memberCall = [&rpcCall](auto&&... args) {
+template<typename Message, typename Signature, typename Interface>
+std::function<void(const Message&)> makeCallHandler(RpcCall<Signature, Interface>& rpcCall) {
+    using TupleType = traits::tuple_from_signatire_t<Signature>;
+    using ReturnType = traits::return_from_signatire_t<Signature>;
+
+    return [&rpcCall](const Message& message) {     // rpcCall is a reference to member
+        const auto memberCall = [&rpcCall](auto&&... args) -> ReturnType {
             if (rpcCall.remoteCallback) {
                 return rpcCall.remoteCallback(args...);
             }
+            // TODO: not the best way to handle the case of no handler for RPC-with-result
+            return ReturnType();
         };
-        std::apply(memberCall, payload.template deserialize<TupleType>());
+        if constexpr (std::is_same_v<void, ReturnType>) {
+            std::apply(memberCall, message.payload.template deserialize<TupleType>());
+        } else {
+            auto result = std::apply(memberCall, message.payload.template deserialize<TupleType>());
+            rpcCall.template doRemoteCall<true>(message.callId, result);
+        }
+    };
+}
+
+template<typename ActualInterface, typename Message, typename Signature>
+std::function<void(ActualInterface*, const Message&)> makeResultHandler() {
+    using ReturnType = traits::return_from_signatire_t<Signature>;
+    return [](ActualInterface* interface, const Message& message) {
+        const auto& result = message.payload.template deserialize<std::tuple<ReturnType>>();
+        interface->template onResultReturned<ReturnType>(message.callId, std::get<0>(result));
     };
 }
 
