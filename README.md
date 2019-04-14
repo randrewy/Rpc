@@ -67,9 +67,13 @@ struct ExampleInterface : public rpc::RpcInterface<ExampleInterface, Payload> {
     Rpc<void(const std::map<std::string, int>& phonebook)> addPhonebook = this;
     Rpc<void()> notifyOne = this;
     Rpc<void()> notifyTwo = this;
+    Rpc<int(int v)> square = this;
 
     template<typename R>
     auto doRemoteCall(Message&& message);
+    
+    template<typename R>
+    void onResultReturned(uint32_t callId, const R& result);
 };
 
 
