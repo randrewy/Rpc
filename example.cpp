@@ -53,15 +53,15 @@ struct ExampleInterface : public rpc::RpcInterface<ExampleInterface, Payload, rp
             auto promise = std::shared_ptr<std::promise<R>>(new std::promise<R>);
             auto future = promise->get_future();
 
-            promises[message.callId] = promise;
-            dummyQueue[message.instanceId].emplace_back(std::move(message));
+            promises[message.header.callId] = promise;
+            dummyQueue[message.header.instanceId].emplace_back(std::move(message));
 
             // it is legit to change return type here, for example `square` was declaread as Rpc<int(int v)>
             // but we want some kind of asynchrony, we use here std::future. Another good variant is a coroutine
             return std::move(future);
         }
 
-        dummyQueue[message.instanceId].emplace_back(std::move(message));
+        dummyQueue[message.header.instanceId].emplace_back(std::move(message));
     }
 
     /// Mandatory customization point #3

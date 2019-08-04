@@ -6,6 +6,15 @@
 
 namespace rpc {
 
+using CallId = uint32_t;
+using InstanceId = uint16_t;
+using FunctionId = uint16_t;
+
+enum class CallType {
+    Call,
+    Response
+};
+
 namespace traits {
 
 template<typename Signature>
@@ -28,16 +37,16 @@ using return_from_signatire_t = typename tuple_from_signatire<T>::ReturnType;
 
 namespace identifiers {
 
-template<uint16_t instanceId = 0>
+template<InstanceId instanceId = 0>
 struct StaticId {
-    constexpr static uint16_t getInstanceId() { return instanceId; }
+    constexpr static InstanceId getInstanceId() { return instanceId; }
 };
 
 struct DynamicId {
-    uint16_t instanceId;
+    InstanceId instanceId;
 
-    void setInstanceId(uint16_t id) { instanceId = id; }
-    uint16_t getInstanceId() { return instanceId; }
+    void setInstanceId(InstanceId id) { instanceId = id; }
+    InstanceId getInstanceId() { return instanceId; }
 };
 
 } // namespace identifiers
@@ -62,6 +71,13 @@ std::function<void(ActualInterface*, const Message&)> makeResultHandler();
 } // namespace details
 
 
+struct RpcMessageHeader {
+    InstanceId instanceId = 0;
+    FunctionId functionId = 0;
+    CallId callId = 0;
+    // uint16_t payloadSize = 0;
+    bool response = false;
+};
 
 /// Packet generated on an RPC call
 /// `Payload` shoud be customized by user.
@@ -81,11 +97,8 @@ std::function<void(ActualInterface*, const Message&)> makeResultHandler();
 /// Tuple is std::tuple of non-const/volatile non-reference `Args...`
 template<typename Payload>
 struct RpcMessage {
-    uint16_t instanceId = 0;
-    uint16_t functionId = 0;
-    uint32_t callId = 0;
+    RpcMessageHeader header;
     Payload payload;
-    bool response = false;
 };
 
 
@@ -111,28 +124,29 @@ struct RpcCall<ReturnType(Args...), RpcInterfaceType> {
     }
 
     inline decltype(auto) operator() (Args... args) {
-        return doRemoteCall<false>(0, args...);
+        return doRemoteCall<CallType::Call>(0, args...);
     }
 
 protected:
 
-    template<bool response>
+    template<CallType calltype>
     inline decltype(auto) doRemoteCall(uint32_t callId, Args... args) {
+        constexpr bool response = calltype == CallType::Response;
         Message message;
-        message.instanceId = interface->getInstanceId();
-        message.functionId = functionId;
-        message.callId = response
+        message.header.instanceId = interface->getInstanceId();
+        message.header.functionId = functionId;
+        message.header.callId = response
                 ? callId
                 : interface->getNextCallId();
+        message.header.response = response;
         message.payload.serialize(args...);
-        message.response = response;
 
         using Return = std::conditional_t<response, void, ReturnType>;
         return static_cast<ActualInterface*>(interface)->template doRemoteCall<Return>(std::move(message));
     }
 
     std::function<ReturnType(Args...)> remoteCallback;
-    uint16_t functionId = 0;
+    FunctionId functionId = 0;
     RpcInterfaceType* interface;
 };
 
@@ -162,26 +176,26 @@ public:
     }
 
     void dispatch(const Message& message) {
-        if (message.response) {
-            auto handlerIt = resultHandlers.find(message.functionId);
+        if (message.header.response) {
+            auto handlerIt = resultHandlers.find(message.header.functionId);
             if (handlerIt != resultHandlers.end()) {
                 handlerIt->second(static_cast<Actual*>(this), message);
             }
         } else {
-            auto handlerIt = callHandlers.find(message.functionId);
+            auto handlerIt = callHandlers.find(message.header.functionId);
             if (handlerIt != callHandlers.end()) {
                 handlerIt->second(message);
             }
         }
     }
 
-    uint32_t getNextCallId() { return ++callIdCounter; }
+    CallId getNextCallId() { return ++callIdCounter; }
 protected:
 
-    uint32_t callIdCounter = 0;
-    uint16_t functionIdCounter = 0;
-    std::unordered_map<uint16_t, std::function<void(const Message&)>> callHandlers;
-    std::unordered_map<uint16_t, std::function<void(Actual*, const Message&)>> resultHandlers; // TODO:: can be plain function pointers
+    CallId callIdCounter = 0;
+    FunctionId functionIdCounter = 0;
+    std::unordered_map<FunctionId, std::function<void(const Message&)>> callHandlers;
+    std::unordered_map<FunctionId, std::function<void(Actual*, const Message&)>> resultHandlers; // TODO:: can be plain function pointers
 };
 
 
@@ -205,7 +219,7 @@ std::function<void(const Message&)> makeCallHandler(RpcCall<Signature, Interface
             std::apply(memberCall, message.payload.template deserialize<TupleType>());
         } else {
             auto result = std::apply(memberCall, message.payload.template deserialize<TupleType>());
-            rpcCall.template doRemoteCall<true>(message.callId, result);
+            rpcCall.template doRemoteCall<CallType::Response>(message.header.callId, result);
         }
     };
 }
@@ -215,7 +229,7 @@ std::function<void(ActualInterface*, const Message&)> makeResultHandler() {
     using ReturnType = traits::return_from_signatire_t<Signature>;
     return [](ActualInterface* interface, const Message& message) {
         const auto& result = message.payload.template deserialize<std::tuple<ReturnType>>();
-        interface->template onResultReturned<ReturnType>(message.callId, std::get<0>(result));
+        interface->template onResultReturned<ReturnType>(message.header.callId, std::get<0>(result));
     };
 }
 
