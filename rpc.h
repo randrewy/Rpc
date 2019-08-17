@@ -82,7 +82,7 @@ protected:
     InstanceId instanceId = 0;
 
     std::vector<std::function<void(const RpcPacket<Payload>&)>> callHandlers;
-    std::unordered_map<FunctionId, std::function<void(Interface*, const RpcPacket<Payload>&)>> resultHandlers;
+    std::unordered_map<FunctionId, void(*)(Interface*, const RpcPacket<Payload>&)> resultHandlers;
 };
 
 
