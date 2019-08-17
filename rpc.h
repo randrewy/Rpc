@@ -53,7 +53,7 @@ public:
     void registerCall(RpcCall<Interface, Payload, ReturnType(Args...)>& call) {
         call.functionId = static_cast<FunctionId>(callHandlers.size());
         call.interface = this;
-        callHandlers.emplace_back(call.makeCallHandler());
+        callHandlers.emplace_back(std::make_pair(&call, call.makeCallHandler()));
 
         if constexpr (!std::is_same_v<void, ReturnType>) {
             resultHandlers[call.functionId] = call.makeResultHandler();
@@ -63,7 +63,8 @@ public:
     void dispatch(const RpcPacket<Payload>& packet) {
         if (packet.callType == CallType::Call) {
             if (packet.functionId < callHandlers.size()) {
-                callHandlers[packet.functionId](packet);
+                auto& selfAndHandler = callHandlers[packet.functionId];
+                selfAndHandler.second(selfAndHandler.first, packet);
             }
         } else {
             auto handlerIt = resultHandlers.find(packet.functionId);
@@ -81,7 +82,7 @@ protected:
     CallId callIdCounter = 0;
     InstanceId instanceId = 0;
 
-    std::vector<std::function<void(const RpcPacket<Payload>&)>> callHandlers;
+    std::vector<std::pair<void*, void(*)(void*, const RpcPacket<Payload>&)>> callHandlers;
     std::unordered_map<FunctionId, void(*)(Interface*, const RpcPacket<Payload>&)> resultHandlers;
 };
 
@@ -118,13 +119,15 @@ protected:
     }
 
     auto makeCallHandler() {
-        return [this](const RpcPacket<Payload>& packet) {
+        return [](void* selfPtr, const RpcPacket<Payload>& packet) {
+            auto* self = static_cast<RpcCall<Interface, Payload, ReturnType(Args...)>*>(selfPtr);
+
             using Tuple = std::tuple<std::remove_cv_t<std::remove_reference_t<Args>>...>;
             if constexpr (std::is_same_v<void, ReturnType>) {
-                std::apply(remoteCallback, packet.payload.template deserialize<Tuple>());
+                std::apply(self->remoteCallback, packet.payload.template deserialize<Tuple>());
             } else {
-                auto result = std::apply(remoteCallback, packet.payload.template deserialize<Tuple>());
-                doRemoteCall<CallType::Response>(packet.callId, std::move(result));
+                auto result = std::apply(self->remoteCallback, packet.payload.template deserialize<Tuple>());
+                self->template doRemoteCall<CallType::Response>(packet.callId, std::move(result));
             }
         };
     }
