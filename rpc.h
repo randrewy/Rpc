@@ -10,6 +10,9 @@ using CallId = uint32_t;
 using InstanceId = uint16_t;
 using FunctionId = uint16_t;
 
+template<typename ...Args>
+using ArgsTuple = std::tuple<std::remove_cv_t<std::remove_reference_t<Args>>...>;
+
 enum class CallType {
     Call,
     Response
@@ -122,7 +125,7 @@ protected:
         return [](void* selfPtr, const RpcPacket<Payload>& packet) {
             auto* self = static_cast<RpcCall<Interface, Payload, ReturnType(Args...)>*>(selfPtr);
 
-            using Tuple = std::tuple<std::remove_cv_t<std::remove_reference_t<Args>>...>;
+            using Tuple = ArgsTuple<Args...>;
             if constexpr (std::is_same_v<void, ReturnType>) {
                 std::apply(self->remoteCallback, packet.payload.template deserialize<Tuple>());
             } else {
