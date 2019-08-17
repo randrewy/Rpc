@@ -35,9 +35,9 @@ struct Payload {
 };
 
 // to simplyfy the example we just store `messages` inside this dummy queue
-static std::map<uint16_t, std::deque<rpc::RpcMessage<Payload>>> dummyQueue;
+static std::map<uint16_t, std::deque<rpc::RpcPacket<Payload>>> dummyQueue;
 
-struct ExampleInterface : public rpc::RpcInterface<ExampleInterface, Payload, rpc::identifiers::DynamicId> {
+struct ExampleInterface : public rpc::RpcInterface<ExampleInterface, Payload> {
     // strange constructor `= this` helps to register calls for this interface
     Rpc<void(int id, const std::string& name, double money)> addAccount = this;
     Rpc<void(const std::map<std::string, int>& phonebook)> addPhonebook = this;
@@ -47,21 +47,21 @@ struct ExampleInterface : public rpc::RpcInterface<ExampleInterface, Payload, rp
 
     /// Mandatory customization point #2
     template<typename R>
-    auto doRemoteCall(Message&& message) {
+    auto sendRpcPacket(rpc::RpcPacket<Payload>&& packet) {
         // this part is used only for rpc with result
         if constexpr (!std::is_same_v<void, R>) {
             auto promise = std::shared_ptr<std::promise<R>>(new std::promise<R>);
             auto future = promise->get_future();
 
-            promises[message.header.callId] = promise;
-            dummyQueue[message.header.instanceId].emplace_back(std::move(message));
+            promises[packet.callId] = promise;
+            dummyQueue[packet.instanceId].emplace_back(std::move(packet));
 
             // it is legit to change return type here, for example `square` was declaread as Rpc<int(int v)>
             // but we want some kind of asynchrony, we use here std::future. Another good variant is a coroutine
             return std::move(future);
         }
 
-        dummyQueue[message.header.instanceId].emplace_back(std::move(message));
+        dummyQueue[packet.instanceId].emplace_back(std::move(packet));
     }
 
     /// Mandatory customization point #3
@@ -70,7 +70,7 @@ struct ExampleInterface : public rpc::RpcInterface<ExampleInterface, Payload, rp
     void onResultReturned(uint32_t callId, const R& result) {
         std::any_cast<std::shared_ptr<std::promise<R>>>(promises[callId])->set_value(result);
     }
-    
+
     std::unordered_map<uint32_t, std::any> promises;
 };
 
@@ -103,7 +103,7 @@ int main() {
     sender.addAccount(1, "Eddart", 1000.1);
     sender.addPhonebook({{"John", 3355450}, {"Rob", 1194517}});
     sender.notifyOne();
-    sender.notifyTwo(); // will be skipped, as no handler is attached to receiver
+    // sender.notifyTwo(); // will throw `bad_function_call`
     std::future<int> future = sender.square(5);
 
     // future not ready yet, receiver should handle it, then sender should handle response
@@ -129,3 +129,4 @@ int main() {
     // now the future is ready
     std::cout << "sender square: " << future.get() << "\n"; // => 25
 }
+
